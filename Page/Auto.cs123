@@ -1,0 +1,1420 @@
+﻿using MySql.Data.MySqlClient;
+using Sunny.UI;
+using System;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using System.IO;
+using ActUtlTypeLib;
+using System.Configuration;
+using Utils;
+using System.Collections.Generic;
+using CF_Library;
+//using static Google.Protobuf.Reflection.FieldOptions.Types;
+//using Sunny.UI.Win32;
+//using System.Windows.Forms.DataVisualization.Charting;
+//using Utils;
+//using System.Runtime.Remoting.Lifetime;
+
+namespace ThicknessMeasurement
+{
+    public partial class Auto : UIPage
+    {
+        ActUtlType PLC = new ActUtlType();
+        //测厚硬件声明
+        public delegate void showInfoDelegate(string info, bool display_time = true);
+        DeviceInfo_t[] deviceList;
+        int deviceNumber = 0;
+        public static int deviceHandle1 = -1; public static int deviceHandle2 = -1; public static int deviceHandle3 = -1;
+
+        // float[] g_measureData = new float[4];
+        List<float> g_measureData_1 = new List<float>();
+        List<float> g_measureData_2 = new List<float>();
+        List<float> g_measureData_3 = new List<float>();
+        bool isDoubleChannel_1 = false;
+        bool isDoubleChannel_2 = false;
+        bool isDoubleChannel_3 = false;     //设备启动在哪里
+
+        float[] g_saturation = new float[4];
+        int g_signalNumber = 0;
+        int g_channel = 0;
+        int[][] signal = new int[2][];
+        int channelIndex = 0;
+        int[] triggerCount = new int[] { 0, 0, 0 };
+        float[] distance = new float[] { 0, 0, 0, 0, };
+        int distanceLen = 0;
+        bool isTriggerPass = false;
+
+        //线程委托更新
+        private delegate void updateuiDelegate(int handle, EventCallbackArgs_t arg, IntPtr userPara);
+
+        bool isInDistanceMode = true;
+        StatusTypeDef ret;
+        //测厚硬件声明
+
+        int PLCReturnCode = 1;
+        MySqlConnection cnn = new MySqlConnection("Database=thicknessmeasurement;datasource=127.0.0.1;port=3306;user=root;password=root;Allow User Variables=True;");
+        MySqlCommand cmd;
+
+
+        DataTable dtMsg = new DataTable();
+
+        public delegate void connectDelegate();
+
+        public Auto()
+        {
+            InitializeComponent();
+        }
+        private void Auto_Shown(object sender, EventArgs e)
+        {
+            setBarChartOption();
+            //连接PLC
+            PLC.ActLogicalStationNumber = 2;
+            PLC.ActPassword = "";
+            PLCReturnCode = PLC.Open();
+            if (PLCReturnCode == 0)
+            {
+                showMessage("状态", "PLC连接成功");
+            }
+            else
+            {
+                showMessage("状态", "PLC连接失败,请检查PLC连接后，重启软件");
+            }
+            timerPLC.Enabled = true;
+            //连接数据库
+            cnn.Open();
+            if (cnn.State == ConnectionState.Open)
+            {
+                showMessage("状态", "数据库连接成功");
+            }
+            cmd = new MySqlCommand("SET SQL_SAFE_UPDATES = 0;DELETE FROM thicknessmeasurement.productionlog where datee < date_add(curdate(),INTERVAL -6 month);SET SQL_SAFE_UPDATES = 1;", cnn);
+            cmd.ExecuteNonQuery();
+            //连接传感器
+            Task.Run(() =>
+            {
+                connectSensor();
+            });
+            
+            //测厚线程
+            Task.Run(() => { measuring(); });
+            uiTextBox8.Text = Calibration.lotNum;
+            uiTextBox6.Text = Calibration.batchNum;
+
+        }
+        bool is_connectedSensor = true;
+        /// <summary>
+        /// 连接测厚传感器
+        /// </summary>
+        void connectSensor()
+        {
+            CF_UserInterface.HPS_CF_RegisterEventCallback(new UserEventCallbackHandleDelegate(UserEventCallbackHandle), IntPtr.Zero);
+            CF_Library.StatusTypeDef ret = CF_Library.StatusTypeDef.Status_Offline;
+            ControllerGEPara_t controllerPara = new ControllerGEPara_t();
+            controllerPara.controllerIp = null;
+
+            if (ConfigurationManager.AppSettings["HPS"] == "CF4000")
+            {
+                ret = CF_UserInterface.HPS_CF_ScanDeviceList(out deviceList, out deviceNumber);//搜索cf4000设备
+                if (ret != StatusTypeDef.Status_Succeed)
+                {
+                    this.showMessage("错误", "错误代码:" + ret);
+
+                }
+                if (deviceNumber == 0)
+                {
+                    this.showMessage("错误", "未寻找到测厚仪器");
+                }
+                ret = CF_UserInterface.HPS_CF_OpenDevice(deviceList[0], ref deviceHandle1, (int)DeviceType_t.HPS_CF4000);
+
+            }
+            else
+            {
+                ret = CF_UserInterface.HPS_CF_GE_OpenDevice(controllerPara, "192.168.0.250", ref deviceHandle1, (int)DeviceType_t.HPS_CF2000);
+
+            }
+            if (ret == StatusTypeDef.Status_Succeed)
+            {
+                this.showMessage("状态", "1号测厚仪器连接完成");
+                ret = StatusTypeDef.Status_Offline;
+            }
+            else
+            {
+                this.showMessage("状态", "1号测厚仪器连接失败");
+                is_connectedSensor = false;
+
+            }
+            if (ConfigurationManager.AppSettings["HPS"] == "CF4000")
+            {
+                ret = CF_UserInterface.HPS_CF_OpenDevice(deviceList[1], ref deviceHandle2, (int)DeviceType_t.HPS_CF4000);
+            }
+            else
+            {
+                ret = CF_UserInterface.HPS_CF_GE_OpenDevice(controllerPara, "192.168.0.251", ref deviceHandle2, (int)DeviceType_t.HPS_CF2000);
+            }
+
+            if (ret == StatusTypeDef.Status_Succeed)
+            {
+                this.showMessage("状态", "2号测厚仪器连接完成");
+                ret = StatusTypeDef.Status_Offline;
+            }
+            else
+            {
+                this.showMessage("状态", "2号测厚仪器连接失败");
+                is_connectedSensor = false;
+            }
+            if (ConfigurationManager.AppSettings["HPS"] == "CF4000")
+            {
+                ret = CF_UserInterface.HPS_CF_OpenDevice(deviceList[2], ref deviceHandle3, (int)DeviceType_t.HPS_CF4000);
+            }
+            else
+            {
+                ret = CF_UserInterface.HPS_CF_GE_OpenDevice(controllerPara, "192.168.0.252", ref deviceHandle3, (int)DeviceType_t.HPS_CF2000);
+            }
+            if (ret == StatusTypeDef.Status_Succeed)
+            {
+                this.showMessage("状态", "3号测厚仪器连接完成");
+                ret = StatusTypeDef.Status_Offline;
+            }
+            else
+            {
+                this.showMessage("状态", "3号测厚仪器连接失败");
+                is_connectedSensor = false;
+            }
+            writePLCValue(PCReady, is_connectedSensor ? 1 : 2);
+            //获取标定系数
+            ret = CF_UserInterface.hps_getDoubleChannelThicknessK(deviceHandle1, 0, ThicnessK_1);
+            ret = CF_UserInterface.hps_getDoubleChannelThicknessK(deviceHandle2, 0, ThicnessK_2);
+            ret = CF_UserInterface.hps_getDoubleChannelThicknessK(deviceHandle3, 0, ThicnessK_3); 
+            try
+            {
+                using (StreamWriter sw = new StreamWriter($@".\data\" + "开启软件时标定系数.txt"))
+                {
+                    sw.WriteLine("开启软件时标定系数");
+                    sw.WriteLine("1号，K0=" + ThicnessK_1[0].ToString() + ",K1=" + ThicnessK_1[1].ToString() + ",K2=" + ThicnessK_1[2].ToString());
+                    sw.WriteLine("2号，K0=" + ThicnessK_2[0].ToString() + ",K1=" + ThicnessK_2[1].ToString() + ",K2=" + ThicnessK_2[2].ToString());
+                    sw.WriteLine("3号，K0=" + ThicnessK_3[0].ToString() + ",K1=" + ThicnessK_3[1].ToString() + ",K2=" + ThicnessK_3[2].ToString());
+                }
+            }
+            catch { }
+
+
+            //双头测厚相关设置
+            ret = CF_UserInterface.HPS_CF_SetIntParam(deviceHandle1, CF_ParameterDefine.PARAM_DOUBLE_CHANNEL_MODE, 0, 1);
+            ret = CF_UserInterface.HPS_CF_SetIntParam(deviceHandle2, CF_ParameterDefine.PARAM_DOUBLE_CHANNEL_MODE, 0, 1);
+            ret = CF_UserInterface.HPS_CF_SetIntParam(deviceHandle3, CF_ParameterDefine.PARAM_DOUBLE_CHANNEL_MODE, 0, 1);
+            isDoubleChannel_1 = true;
+            isDoubleChannel_2 = true;
+            isDoubleChannel_3 = true;
+
+            
+        }
+        public static double[] ThicnessK_1 = new double[3]; public static double[] ThicnessK_2 = new double[3]; public static double[] ThicnessK_3 = new double[3];
+        public void UserEventCallbackHandle(int handle, EventCallbackArgs_t arg, IntPtr userPara)
+        {
+
+            //光谱共焦数据回调函数，这里不宜做复杂的操作，应该只是将数据拷贝走
+            //接收到数据
+            if (handle == Auto.deviceHandle1)
+            {
+                if (arg.eventType == EventTypeDef.EventType_DataRecv)
+                {
+                    if (isDoubleChannel_1)    //设置一个标志位，在设备启动的时，开双头模式的时候设true
+                    {
+                        doubleChannelDataProcess(arg.data, arg.dataLen);
+                    }
+                }
+            }
+            else if (handle == Auto.deviceHandle2)
+            {
+                if (arg.eventType == EventTypeDef.EventType_DataRecv)
+                {
+
+                    if (isDoubleChannel_2)
+                        doubleChannelDataProcess2(arg.data, arg.dataLen);
+                }
+            }
+            else if (handle == Auto.deviceHandle3)
+            {
+                if (arg.eventType == EventTypeDef.EventType_DataRecv)
+                {
+
+                    if (isDoubleChannel_3)
+                        doubleChannelDataProcess3(arg.data, arg.dataLen);
+                }
+            }
+        }
+
+        void doubleChannelDataProcess(IntPtr data, int dataLen)
+        {
+            //获取测量结果，数组存储每个通道的计算结果，如果只有一个通道，则数组长度为1
+            MC_ResultDataTypeDef_t[] result = Util.IntPtrToStructArray<MC_ResultDataTypeDef_t>(data, dataLen);
+
+            if (dataLen > 0)
+            {
+                g_measureData_1.Add(result[0].thickness);  //测量结果,默认没有使能多距离测量模式只有resul[0]数据是有效的
+            }
+        }
+        void doubleChannelDataProcess2(IntPtr data, int dataLen)
+        {
+            //获取测量结果，数组存储每个通道的计算结果，如果只有一个通道，则数组长度为1
+            MC_ResultDataTypeDef_t[] result = Util.IntPtrToStructArray<MC_ResultDataTypeDef_t>(data, dataLen);
+
+            if (dataLen > 0)
+            {
+                g_measureData_2.Add(result[0].thickness);  //测量结果,默认没有使能多距离测量模式只有resul[0]数据是有效的
+            }
+        }
+        void doubleChannelDataProcess3(IntPtr data, int dataLen)
+        {
+            //获取测量结果，数组存储每个通道的计算结果，如果只有一个通道，则数组长度为1
+            MC_ResultDataTypeDef_t[] result = Util.IntPtrToStructArray<MC_ResultDataTypeDef_t>(data, dataLen);
+
+            if (dataLen > 0)
+            {
+                g_measureData_3.Add(result[0].thickness);  //测量结果,默认没有使能多距离测量模式只有resul[0]数据是有效的
+            }
+        }
+        string MesStaus = ""; string Thickness = ""; string BatchID = ""; int MaterialID = 7010; string SetMax = ""; string SetMin = ""; string SetMax_Min = "";
+        private void Form2_Load(object sender, EventArgs e)
+        {
+            System.Windows.Forms.Control.CheckForIllegalCrossThreadCalls = false;
+            {
+                dgvMsg.DataSource = dtMsg;
+                dtMsg.Columns.Add(new DataColumn("   类型", typeof(string)));
+                dtMsg.Columns.Add(new DataColumn("   内容", typeof(string)));
+                dtMsg.Columns.Add(new DataColumn("   时间", typeof(string)));
+                dgvMsg.Init();//SunnyUI的dgv初始化功能
+                dgvMsg.ReadOnly = true;
+                dgvMsg.Columns[0].Width = 100;
+                dgvMsg.Columns[1].Width = 436;
+                dgvMsg.RowsDefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
+            }//右下角dgv消息列表
+            setChartOption1(); setChartOption2(); setChartOption3(); //setBarChartOption();
+            showMessage("状态", "图表初始化完成");
+            PCHeartBeat = ConfigurationManager.AppSettings["PCHeartBeat"];
+            PLCHeartBeat = ConfigurationManager.AppSettings["PLCHeartBeat"];
+            PLCStart = ConfigurationManager.AppSettings["PLCStart"];
+            PCResult = ConfigurationManager.AppSettings["PCResult"];
+            PCReady = ConfigurationManager.AppSettings["PCReady"];
+            MesStaus = ConfigurationManager.AppSettings["MESStatus"];
+            SetMax = ConfigurationManager.AppSettings["SetMax"];
+            SetMin = ConfigurationManager.AppSettings["SetMin"];
+            SetMax_Min = ConfigurationManager.AppSettings["SetMax_Min"];
+            Thickness = ConfigurationManager.AppSettings["Thickness"];
+            BatchID = ConfigurationManager.AppSettings["BatchID"];
+            MaterialID = Convert.ToInt32(ConfigurationManager.AppSettings["MaterialID"]);
+
+            Calibration.isSaved = true;
+        }
+        string PCHeartBeat = ""; string PLCHeartBeat = ""; string PLCStart = ""; string PCResult = ""; string PCReady = "";
+        private void Form2_Initialize(object sender, EventArgs e)
+        {
+            if (Calibration.points == 9)
+            {
+                txb4.Visible = false;
+                txb8.Visible = false;
+                txb12.Visible = false;
+                uiLine4.Visible = false;
+                uiLine6.Visible = false;
+                uiLine11.Visible = false;
+            }
+            else if (Calibration.points == 12)
+            {
+                txb4.Visible = true;
+                txb8.Visible = true;
+                txb12.Visible = true;
+                uiLine4.Visible = true;
+                uiLine6.Visible = true;
+                uiLine11.Visible = true;
+            }
+            uiTextBox8.Text = Calibration.lotNum;
+            uiTextBox6.Text = Calibration.batchNum;
+            if (Calibration.isSaved)
+            {
+                setBarChartOption();
+                setChartOption1();
+                setChartOption2();
+                setChartOption3();
+                Calibration.isSaved = false;
+            }
+        }
+        void setChartOption1()
+        {
+            UILineOption option = new UILineOption();
+            option.ToolTip.Visible = true;
+            option.Title = new UITitle();
+            option.Title.Text = "测厚数据曲线";
+            option.Title.SubText = "1号测量头";
+            option.YAxis.SetRange(Calibration.setThickness - Calibration.lineChartRange / 2, Calibration.setThickness + Calibration.lineChartRange / 2);
+            option.XAxis.AxisLabel.DecimalPlaces = 0;//坐标轴显示小数位数
+            option.YAxis.AxisLabel.DecimalPlaces = 4;
+            option.XAxis.Name = "采样点数/个";
+            option.YAxis.Name = "厚度/mm";
+            var series = option.AddSeries(new UILineSeries("厚度曲线"));
+            series.YAxisDecimalPlaces = 4;
+            lineChart1.SetOption(option);
+            lineChart1.FillColor = Color.FromArgb(243, 249, 255);
+        }
+        void setChartOption2()
+        {
+            UILineOption option = new UILineOption();
+            option.ToolTip.Visible = true;
+            option.Title = new UITitle();
+            option.Title.Text = "测厚数据曲线";
+            option.Title.SubText = "2号测量头";
+            option.YAxis.SetRange(Calibration.setThickness - Calibration.lineChartRange / 2, Calibration.setThickness + Calibration.lineChartRange / 2);
+            option.XAxis.AxisLabel.DecimalPlaces = 0;//坐标轴显示小数位数
+            option.YAxis.AxisLabel.DecimalPlaces = 4;
+            option.XAxis.Name = "采样点数/个";
+            option.YAxis.Name = "厚度/mm";
+            var series = option.AddSeries(new UILineSeries("厚度曲线"));
+            series.YAxisDecimalPlaces = 4;
+            lineChart2.SetOption(option);
+            lineChart2.FillColor = Color.FromArgb(243, 249, 255);
+        }
+        void setChartOption3()
+        {
+            UILineOption option = new UILineOption();
+            option.ToolTip.Visible = true;
+            option.Title = new UITitle();
+            option.Title.Text = "测厚数据曲线";
+            option.Title.SubText = "3号测量头";
+            option.YAxis.SetRange(Calibration.setThickness - Calibration.lineChartRange / 2, Calibration.setThickness + Calibration.lineChartRange / 2);
+            option.XAxis.AxisLabel.DecimalPlaces = 0;//坐标轴显示小数位数
+            option.YAxis.AxisLabel.DecimalPlaces = 4;
+            option.XAxis.Name = "采样点数/个";
+            option.YAxis.Name = "厚度/mm";
+            var series = option.AddSeries(new UILineSeries("厚度曲线"));
+            series.YAxisDecimalPlaces = 4;
+            lineChart3.SetOption(option);
+            lineChart3.FillColor = Color.FromArgb(243, 249, 255);
+        }
+        void setBarChartOption()
+        {
+            UIBarOption option = new UIBarOption();
+            option.Title = new UITitle();
+            option.Title.Text = "";
+            option.Title.SubText = "";
+            option.YAxis.SetRange(Calibration.setThickness - Calibration.barChartRange / 2, Calibration.setThickness + Calibration.barChartRange / 2);
+
+            //设置Legend
+            option.Legend = new UILegend();
+            option.Legend.Orient = UIOrient.Horizontal;
+            option.Legend.Top = UITopAlignment.Top;
+            option.Legend.Left = UILeftAlignment.Left;
+            option.Legend.AddData("1号测量头");
+            option.Legend.AddData("2号测量头");
+            option.Legend.AddData("3号测量头");
+
+            var series = new UIBarSeries();
+            series.Name = "1号测量头";
+            series.AddData(d11);
+            series.AddData(d12);
+            series.AddData(d13);
+            if (Calibration.points == 12)
+            {
+                series.AddData(d14);
+            }
+            //数据显示小数位数
+            series.DecimalPlaces = 4;
+            option.Series.Add(series);
+            series = new UIBarSeries();
+            series.Name = "2号测量头";
+            series.AddData(d21);
+            series.AddData(d22);
+            series.AddData(d23);
+            if (Calibration.points == 12)
+            {
+                series.AddData(d24);
+            }
+            series.DecimalPlaces = 4;
+            option.Series.Add(series);
+
+            series = new UIBarSeries();
+            series.AddData(d31);
+            series.AddData(d32);
+            series.AddData(d33);
+            if (Calibration.points == 12)
+            {
+                series.AddData(d34);
+            }
+            series.Name = "3号测量头";
+            series.DecimalPlaces = 4;
+            option.Series.Add(series);
+
+            option.XAxis.Data.Add("取样点1");
+            option.XAxis.Data.Add("取样点2");
+            option.XAxis.Data.Add("取样点3");
+            if (Calibration.points == 12)
+            {
+                option.XAxis.Data.Add("取样点4");
+            }
+            option.ToolTip.Visible = true;
+            option.YAxis.Scale = true;
+            //坐标轴显示小数位数
+            option.YAxis.AxisLabel.DecimalPlaces = 4;
+
+            option.YAxisScaleLines.Add(new UIScaleLine() { Color = Color.Red, Name = "上限", Value = Calibration.setMax });
+            option.YAxisScaleLines.Add(new UIScaleLine() { Color = Color.Red, Name = "下限", Value = Calibration.setMin });
+
+            option.ToolTip.AxisPointer.Type = UIAxisPointerType.Shadow;
+
+            option.ShowValue = true;
+            uiBarChart1.Refresh();
+            uiBarChart1.SetOption(option);
+            uiBarChart1.FillColor = Color.FromArgb(243, 249, 255);
+            uiBarChart1.Refresh();
+        }
+
+        /// <summary>
+        /// 右下角消息记录插入一条消息
+        /// </summary>
+        /// <param name="msgType">status、info、warning、error</param>
+        /// <param name="msg">消息内容</param>
+        void showMessage(string msgType, string msg)
+        {
+            this.Invoke(new Action(delegate
+            {
+                dtMsg.Rows.Add(msgType, msg, DateTime.Now.ToString("HH时mm分ss秒"));
+                dgvMsg.FirstDisplayedScrollingRowIndex = this.dgvMsg.Rows.Count - 1;//自动下拉到最后一行
+                                                                                    //消息超过一定数量就删除一部分
+                if (dgvMsg.Rows.Count > 50)
+                {
+                    for (int i = 0; i < 10; i++)
+                    {
+                        dtMsg.Rows[0].Delete();
+                    }
+                }
+            }));
+
+        }
+
+        private void uiButton1_Click(object sender, EventArgs e)
+        {
+            showMessage("状态", "点击按钮");
+            measuringStatus = "正在测厚……";
+        }
+
+        double avg = 0;
+        void writePLCValue(string Device, int Data)
+        {
+            PLCReturnCode = PLC.SetDevice(Device, Data);
+        }
+        public static string measuringStatus = "等待产品进入";
+        double[] dataFromSsr1 = new double[] { };
+        double[] dataFromSsr2 = new double[] { };
+        double[] dataFromSsr3 = new double[] { };
+        DataTable DtChart1 = new DataTable();
+        DataTable DtChart2 = new DataTable();
+        DataTable DtChart3 = new DataTable();
+        DateTime dateTimeStart;
+        DateTime dateTimeEnd;
+        DateTime measureStart;
+        string[] r = new string[] {ConfigurationManager.AppSettings["r1"] , ConfigurationManager.AppSettings["r2"], ConfigurationManager.AppSettings["r3"], ConfigurationManager.AppSettings["r4"], ConfigurationManager.AppSettings["r5"], ConfigurationManager.AppSettings["r6"], ConfigurationManager.AppSettings["r7"], ConfigurationManager.AppSettings["r8"], ConfigurationManager.AppSettings["r9"], ConfigurationManager.AppSettings["r10"], ConfigurationManager.AppSettings["r11"], ConfigurationManager.AppSettings["r12"], };
+        /// <summary>
+        /// 测厚线程
+        /// </summary>
+        void measuring()
+		{
+            int plcStart=0;
+            int plcStop = 0;
+            while (true)
+			{
+				switch (measuringStatus)
+				{
+                    case "等待产品进入":
+						PLCReturnCode = PLC.GetDevice(PLCStart, out plcStart);//PLC给出开始测厚信号后，开始测厚
+						if (plcStart == 1)//plc给出开始测量信号
+						{
+                            writePLCValue(PCResult, 0); writePLCValue(ConfigurationManager.AppSettings["PCResultAvg"], 0);//清之前的测量结果
+                            for (int i = 0; i < 12; i++)
+							{
+                                writePLCValue(r[i], 0);
+							}
+							measuringStatus = "正在测厚……";
+						}
+						break;
+                    case "正在测厚……":
+                        //判断是否由PLC下发判定，还是本地
+                        PLC.GetDevice(MesStaus, out int mesStatus);
+                        if (mesStatus == 1)
+                        {
+                            PLC.GetDevice(BatchID, out int batchID); uiTextBox6.Text = batchID.ToString();
+                            uiTextBox8.Text = plcGetString(Convert.ToInt32(MaterialID)).Trim();
+                            PLC.GetDevice(Thickness, out int thickness); Calibration.setThickness = ((double)thickness) / 10000;
+                            PLC.GetDevice(SetMax, out int setMax); Calibration.setMax = ((double)setMax) / 10000;
+                            PLC.GetDevice(SetMin, out int setMin); Calibration.setMin = ((double)setMin) / 10000;
+                            PLC.GetDevice(SetMax_Min ,out int setMax_Min); Calibration.setMax_Min = ((double)setMax_Min) / 10000;
+
+                        }
+                        showMessage("状态", measuringStatus);
+
+                        //开始测厚
+                        if (false)
+                        {//已经启动连续测量，就跳出
+                            measuringStatus = "等待产品进入";
+                        }
+                        else
+                        {
+                            //启动测量
+                            CF_UserInterface.HPS_CF_StartSample(deviceHandle1, true);
+                            CF_UserInterface.HPS_CF_StartSample(deviceHandle2, true);
+                            CF_UserInterface.HPS_CF_StartSample(deviceHandle3, true);
+                            dateTimeStart = DateTime.Now;
+                            DateTime dateTime = DateTime.Now;
+                            bool overTime = false;
+                            if (ConfigurationManager.AppSettings["StopMode"] == "PLC")
+                            {
+                                PLCReturnCode = PLC.GetDevice(PLCStart, out plcStart);//PLC给出Stop测厚信号后，停止测厚
+                                while (plcStart != 2 && overTime == false)
+                                {
+                                    if ((DateTime.Now - dateTime).TotalSeconds > (Convert.ToInt32(ConfigurationManager.AppSettings["Delay"]))/1000)
+                                    {
+                                        ShowErrorNotifier("测厚超时，请检查板是否通过", false, 900000);
+                                        showMessage("错误", "测厚超时，请检查板是否通过");
+                                        writePLCValue(PCResult, 2);
+                                        writePLCValue(PLCStart, 0);
+                                        overTime = true;
+                                    }
+                                    PLCReturnCode = PLC.GetDevice(PLCStart, out plcStart);
+                                    Delay(50);
+                                }
+                            }
+                            else
+                            {
+                                Delay(Convert.ToInt32(ConfigurationManager.AppSettings["Delay"]));
+                            }
+                            #region//判断数据无效时停止测厚，弃用
+                            string filePath = $@".\data\4\" + DateTime.Now.ToString("yyyy-MM-dd-HH-mm-ss") + ".csv";
+                            //int len;
+
+                            //using (StreamWriter sw = new StreamWriter(filePath))
+                            //{
+                            //    ret = CF4xxxDevice.hps_getLatestResult_MC(deviceHandle1, out res, out len);
+                            //    sw.WriteLine(res[0].thickness.ToString("0.0000"));
+                            //    DateTime dateTime = DateTime.Now;
+                            //    bool overTime = false;
+                            //    //获取一帧最新的测量结果
+                            //    //不同于单次采集模式，这里获取到的测量结果是内部连续采集最新的一次测量结果，滤波参数适用于该接口
+                            //    while ((res[0].thickness <= 0.3 || res[0].thickness >= 3) && overTime == false)
+                            //    {
+                            //        if ((DateTime.Now - dateTime).TotalSeconds > 15)
+                            //        {
+                            //            ShowErrorNotifier("测厚超时，请检查板是否通过", false, 900000);
+                            //            showMessage("错误", "测厚超时，请检查板是否通过");
+                            //            writePLCValue(PCResult, 2);
+                            //            overTime = true;
+                            //        }
+                            //        ret = CF4xxxDevice.hps_getLatestResult_MC(deviceHandle1, out res, out len);
+                            //        sw.WriteLine(res[0].thickness.ToString("0.0000"));
+                            //        Delay(20);
+                            //    }
+                            //    Delay(1000);
+                            //    if (ConfigurationManager.AppSettings["StopMode"]=="Remote")
+                            //    {
+                            //        ret = CF4xxxDevice.hps_getLatestResult_MC(deviceHandle1, out res, out len);
+                            //        sw.WriteLine(res[0].thickness.ToString("0.0000"));
+                            //        int failCount = 0;
+                            //        dateTime = DateTime.Now;
+                            //        //while ((res[0].thickness >= 0.3 && res[0].thickness <= 3) && failCount <= 10)
+                            //        while(failCount<=10)
+                            //        {
+
+                            //            if ((DateTime.Now - dateTime).TotalSeconds > 15)
+                            //            {
+                            //                ShowErrorNotifier("测厚超时，请检查板是否通过", false, 900000);
+                            //                showMessage("错误", "测厚超时，请检查板是否通过");
+                            //                writePLCValue(PCResult, 2);
+                            //                failCount = 100;
+                            //            }
+                            //            if (!(res[0].thickness >= 0.3 && res[0].thickness <= 3))
+                            //            {
+                            //                failCount++;
+                            //            }
+                            //            ret = CF4xxxDevice.hps_getLatestResult_MC(deviceHandle1, out res, out len);
+                            //            sw.WriteLine(res[0].thickness.ToString("0.0000"));
+                            //            Delay(20);
+                            //        }
+                            //    }
+                            //    else
+                            //    {
+                            //        for (int i = 0; i < 400; i++)
+                            //        {
+                            //            ret = CF4xxxDevice.hps_getLatestResult_MC(deviceHandle1, out res, out len);
+                            //            sw.WriteLine(res[0].thickness.ToString("0.0000"));
+                            //            Delay(20);
+                            //        }
+                            //    }
+                            //    Delay(500);
+                            //}
+
+                            //while (stop == false)
+                            //{
+                            //    Delay(50);
+                            //}
+                            //stop = false;
+                            #endregion
+                            //停止测厚
+                            measureStart = DateTime.Now;
+                            ret = CF_UserInterface.HPS_CF_StartSample(deviceHandle1, false);
+                            ret = CF_UserInterface.HPS_CF_StartSample(deviceHandle2, false);
+                            ret = CF_UserInterface.HPS_CF_StartSample(deviceHandle3, false);
+
+                            dateTimeEnd = DateTime.Now;
+                          
+                            uitextbox11.Text = (dateTimeEnd - dateTimeStart).TotalSeconds.ToString();
+                            //获取数据
+                            dataFromSsr1 = new double[g_measureData_1.Count];
+                            for (int i = 0; i < g_measureData_1.Count; i++)
+                            {
+                                dataFromSsr1[i] = (double)g_measureData_1[i];
+                            }
+                            dataFromSsr2 = new double[g_measureData_2.Count];
+                            for (int i = 0; i < g_measureData_2.Count; i++)
+                            {
+                                dataFromSsr2[i] = (double)g_measureData_2[i];
+                            }
+                            dataFromSsr3 = new double[g_measureData_3.Count];
+                            for (int i = 0; i < g_measureData_3.Count; i++)
+                            {   
+                                dataFromSsr3[i] = (double)g_measureData_3[i];
+                            }
+                            g_measureData_1.Clear();
+                            g_measureData_2.Clear();
+                            g_measureData_3.Clear();
+
+
+
+							//int dataCount = 0;  //cache当前存储的数据个数
+							//int retLen = 0;     //实际读取的数据长度
+							//CF4xxxDevice.hps_getCurDataCacheCount(deviceHandle2, channelIndex, out dataCount);
+							//dataFromSsr2 = new double[dataCount];
+
+							//StatusTypeDef ret = CF4xxxDevice.hps_dumpCacheData_MC(deviceHandle2, channelIndex, res, dataCount, ref retLen);//这个res还有什么其他先决条件吗
+							//for (int i = 0; i < retLen; i++)
+							//{
+							//    dataFromSsr2[i] = res[i].thickness;   //获取厚度值举例
+							//}
+							//CF4xxxDevice.hps_clearDataCache(deviceHandle1, channelIndex);
+
+
+
+
+
+
+
+
+							//要获取20000个数据
+							//         int dataCount = 0;
+							//CF4xxxDevice.hps_getCurDataCacheCount(deviceHandle1, channelIndex, out dataCount);
+							//dataFromSsr1 = new double[dataCount];
+							//for (int i = 0; i < dataCount; i++)
+							//{
+							//    dataFromSsr1[i] = g_measureData[i];
+							//}
+							//double[] a = new double[dataCount];
+							//CF4xxxDevice.hps_dumpCacheData(deviceHandle1, channelIndex, dataFromSsr1, 20000, ref dataCount);
+							//int retLen = 0;
+							//CF4xxxDevice.hps_dumpCacheData_MC(deviceHandle1, channelIndex, res, 20000, ref retLen);
+							//for (int i = 0; i < retLen; i++)
+							//{
+							//    dataFromSsr1[i] = res[i].thickness;   //获取厚度值举例
+							//}
+							//CF4xxxDevice.hps_clearDataCache(deviceHandle1, channelIndex);
+
+							//dataCount = 0;
+							//CF4xxxDevice.hps_getCurDataCacheCount(deviceHandle2, channelIndex, out dataCount);
+							//dataFromSsr2 = new double[dataCount];
+							// CF4xxxDevice.hps_dumpCacheData(deviceHandle2, channelIndex, dataFromSsr2, 20000, ref dataCount);
+							//CF4xxxDevice.hps_dumpCacheData_MC(deviceHandle2, channelIndex, res, 20000, ref dataCount);
+							//for (int i = 0; i < dataCount; i++)
+							//{
+							//    dataFromSsr2[i] = res[i].thickness;   //获取厚度值举例
+							//}
+							//CF4xxxDevice.hps_clearDataCache(deviceHandle2, channelIndex);
+
+							//dataCount = 0;
+							//CF4xxxDevice.hps_getCurDataCacheCount(deviceHandle3, channelIndex, out dataCount);
+							//dataFromSsr3 = new double[dataCount];
+							//CF4xxxDevice.hps_dumpCacheData(deviceHandle3, channelIndex, dataFromSsr3, 20000, ref dataCount);
+							//CF4xxxDevice.hps_dumpCacheData_MC(deviceHandle3, channelIndex, res, 20000, ref dataCount);
+							//for (int i = 0; i < dataCount; i++)
+							//{
+							//    dataFromSsr3[i] = res[i].thickness;   //获取厚度值举例
+							//}
+							//CF4xxxDevice.hps_clearDataCache(deviceHandle3, channelIndex);
+							//CF4xxxDevice.hps_getMultiChannelMeasureOffset(deviceHandle1, channelIndex, out double offset);
+							//CF4xxxDevice.hps_getMultiChannelMeasureOffset(deviceHandle1, channelIndex, out double offset2);
+							//CF4xxxDevice.hps_getMultiChannelMeasureOffset(deviceHandle1, channelIndex, out double offset3);
+							//showMessage("状态", dataCount.ToString() + "," + dataCount2.ToString() + "," + dataCount3.ToString());
+
+							Task.Run(() =>
+							{
+								filePath = $@".\data\1\" + DateTime.Now.ToString("yyyy-MM-dd-HH-mm-ss") + ".csv";
+								using (StreamWriter sw = new StreamWriter(filePath))
+								{
+									try
+									{
+										for (int j = 0; j < dataFromSsr1.Length; j++)
+										{
+											sw.WriteLine(dataFromSsr1[j].ToString("0.0000"));
+										}
+									}
+									catch
+									{
+
+									}
+								}
+								filePath = $@".\data\2\" + DateTime.Now.ToString("yyyy-MM-dd-HH-mm-ss") + ".csv";
+								using (StreamWriter sw = new StreamWriter(filePath))
+								{
+									try
+									{
+										for (int j = 0; j < dataFromSsr2.Length; j++)
+										{
+											sw.WriteLine(dataFromSsr2[j].ToString("0.0000"));
+										}
+									}
+									catch
+									{
+
+									}
+								}
+								filePath = $@".\data\3\" + DateTime.Now.ToString("yyyy-MM-dd-HH-mm-ss") + ".csv";
+								using (StreamWriter sw = new StreamWriter(filePath))
+								{
+									try
+									{
+										for (int j = 0; j < dataFromSsr3.Length; j++)
+										{
+											sw.WriteLine(dataFromSsr3[j].ToString("0.0000"));
+										}
+									}
+									catch
+									{
+
+									}
+								}
+
+							});
+
+							lineChart2.Option.Clear();
+                            setChartOption2();
+                            convertData(dataFromSsr2, lineChart2, out DtChart2,out avg2);
+                            lineChart3.Option.Clear();
+                            setChartOption3();
+                            convertData(dataFromSsr3, lineChart3, out DtChart3,out avg3);
+                            lineChart1.Option.Clear();
+                            setChartOption1();
+                            convertData(dataFromSsr1, lineChart1, out DtChart1,out avg1);
+                            avg123 = (avg1 + avg2 + avg3) / 3;
+                            avgData(avg1,avg123,DtChart1,lineChart1, out DtChart1);
+                            avgData(avg2,avg123, DtChart2,lineChart2, out DtChart2);
+                            avgData(avg3,avg123, DtChart3,lineChart3, out DtChart3);
+                            Task.Run(() =>
+                            {
+                                using (StreamWriter sw = new StreamWriter("E:\\测厚数据\\1号测量头测厚数据\\" + DateTime.Now.ToString("yyyy-MM-dd HH_mm_ss") + ".csv"))
+                                {
+                                    for (int j = 0; j < DtChart1.Rows.Count; j++)
+                                    {
+                                    sw.WriteLine(Convert.ToDouble(DtChart1.Rows[j][0]).ToString("0.0000"));
+                                    }
+                                }
+                                using (StreamWriter sw = new StreamWriter($@"E:\测厚数据\2号测量头测厚数据\" + DateTime.Now.ToString("yyyy-MM-dd HH_mm_ss") + ".csv"))
+                                {
+                                    for (int j = 0; j < DtChart2.Rows.Count; j++)
+                                    {
+                                        sw.WriteLine(Convert.ToDouble(DtChart2.Rows[j][0]).ToString("0.0000"));
+                                    }
+                                }
+                                using (StreamWriter sw = new StreamWriter($@"E:\测厚数据\3号测量头测厚数据\" + DateTime.Now.ToString("yyyy-MM-dd HH_mm_ss") + ".csv"))
+                                {
+                                    for (int j = 0; j < DtChart3.Rows.Count; j++)
+                                    {
+                                        sw.WriteLine(Convert.ToDouble(DtChart3.Rows[j][0]).ToString("0.0000"));
+                                    }
+                                }
+                            });
+                            
+                            measuringStatus = "测厚已完成";
+                        }
+                        break;
+                    case "测厚已完成":
+                        //数据分配
+                        d11 = 0;d12=0;d13 = 0;d14 = 0; d21 = 0; d22 = 0; d23 = 0; d24 = 0; d31 = 0; d32 = 0; d33 = 0; d34 = 0;
+                        try
+                        {
+                            d11 = Convert.ToDouble(DtChart1.Rows[(int)(DtChart1.Rows.Count * (Calibration.setLocation1 / 100))][0]);
+                            d12 = Convert.ToDouble(DtChart1.Rows[(int)(DtChart1.Rows.Count * (Calibration.setLocation2 / 100))][0]);
+                            d13 = Convert.ToDouble(DtChart1.Rows[(int)(DtChart1.Rows.Count * (Calibration.setLocation3 / 100))][0]);
+                            d14 = Convert.ToDouble(DtChart1.Rows[(int)(DtChart1.Rows.Count * (Calibration.setLocation4 / 100))][0]);
+                            txb1.Text = d11.ToString("0.0000") + "mm";
+                            txb2.Text = d12.ToString("0.0000") + "mm";
+                            txb3.Text = d13.ToString("0.0000") + "mm";
+                            txb4.Text = d14.ToString("0.0000") + "mm";
+                        }
+                        catch 
+                        {
+                            ShowErrorNotifier("测厚头1号数据异常，请检查", false, 900000);
+                            showMessage("错误", "测厚头1号数据异常，请检查");
+                        }
+                        try
+                        {
+                            d21 = Convert.ToDouble(DtChart2.Rows[(int)(DtChart2.Rows.Count * (Calibration.setLocation1 / 100))][0]);
+                            d22 = Convert.ToDouble(DtChart2.Rows[(int)(DtChart2.Rows.Count * (Calibration.setLocation2 / 100))][0]);
+                            d23 = Convert.ToDouble(DtChart2.Rows[(int)(DtChart2.Rows.Count * (Calibration.setLocation3 / 100))][0]);
+                            d24 = Convert.ToDouble(DtChart2.Rows[(int)(DtChart2.Rows.Count * (Calibration.setLocation4 / 100))][0]);
+                            txb5.Text = d21.ToString("0.0000") + "mm";
+                            txb6.Text = d22.ToString("0.0000") + "mm";
+                            txb7.Text = d23.ToString("0.0000") + "mm";
+                            txb8.Text = d24.ToString("0.0000") + "mm";
+                        }
+                        catch 
+                        {
+                            ShowErrorNotifier("测厚头2号数据异常，请检查", false, 900000);
+                            showMessage("错误", "测厚头2号数据异常，请检查");
+                        }
+                        try
+                        {
+                            d31 = Convert.ToDouble(DtChart3.Rows[(int)(DtChart3.Rows.Count * (Calibration.setLocation1 / 100))][0]);
+                            d32 = Convert.ToDouble(DtChart3.Rows[(int)(DtChart3.Rows.Count * (Calibration.setLocation2 / 100))][0]);
+                            d33 = Convert.ToDouble(DtChart3.Rows[(int)(DtChart3.Rows.Count * (Calibration.setLocation3 / 100))][0]);
+                            d34 = Convert.ToDouble(DtChart3.Rows[(int)(DtChart3.Rows.Count * (Calibration.setLocation4 / 100))][0]);
+                            txb9.Text = d31.ToString("0.0000") + "mm";
+                            txb10.Text = d32.ToString("0.0000") + "mm";
+                            txb11.Text = d33.ToString("0.0000") + "mm";
+                            txb12.Text = d34.ToString("0.0000") + "mm";
+                        }
+                        catch {
+                            ShowErrorNotifier("测厚头3号数据异常，请检查", false, 900000);
+                            showMessage("错误", "测厚头3号数据异常，请检查");
+                        }
+                        uiBarChart1.Refresh();
+                        setBarChartOption();
+                        uiBarChart1.Refresh();
+                        //求和取平均
+                        double sum = 0;
+
+                        //for (int i = 0; i < DtChart1.Rows.Count; i++)
+                        //{
+                        //    sum += Convert.ToDouble(DtChart1.Rows[i][0]);
+                        //}
+                        //for (int i = 0; i < DtChart2.Rows.Count; i++)
+                        //{
+                        //    sum += Convert.ToDouble(DtChart2.Rows[i][0]);
+                        //}
+                        //for (int i = 0; i < DtChart3.Rows.Count; i++)
+                        //{
+                        //    sum += Convert.ToDouble(DtChart3.Rows[i][0]);
+                        //}
+                        //avg = sum / (DtChart1.Rows.Count + DtChart2.Rows.Count + DtChart3.Rows.Count);
+                        avg = avg123;
+
+                        sum = d11+d12+d13+d14+d21+d22+d23+d24+d31+d32+d33+d34;
+                        //avg = sum / 12;
+                        uiTextBox5.Text = avg.ToString("0.0000") + "mm";                      
+                        try 
+                        {
+                            //测量结束后，给plc写入测量结果
+                            writePLCValue(ConfigurationManager.AppSettings["PCResultAvg"], (int)(avg * 10000));
+                            double[] doubles = { d11, d12, d13, d14, d21, d22, d23, d24, d31, d32, d33, d34 };
+                            for (int i = 0; i < 12; i++)
+							{
+                                writePLCValue(r[i], (int)(doubles[i] * 10000));
+							}
+                        } catch { }
+                        double max;double min;
+                        if (Calibration.points == 9)
+						{
+                            double[] doubles = { d11, d12, d13, d21, d22, d23, d31, d32, d33 };
+                            max = doubles.Max();
+                            min = doubles.Min();
+                        }
+                        else 
+						{
+
+							double[] doubles = { d11, d12, d13, d14, d21, d22, d23, d24, d31, d32, d33, d34 };
+                            max = doubles.Max();
+                            min = doubles.Min();
+                        }
+
+
+                        double max_min = max - min;
+                        string result = "";
+                        
+                        uiTextBox2.Text = max.ToString("0.0000") + "mm";
+                        uiTextBox3.Text = min.ToString("0.0000") + "mm";
+                        uiTextBox4.Text = max_min.ToString("0.0000") + "mm";
+                        //plc写入判断结果
+                        if (Calibration.mode == 0) 
+                        {
+                            if (max_min > Calibration.setMax_Min)
+                            {
+                                ShowErrorNotifier("产品极差超出设定值，请检查产品是否异常", false, 900000);
+                                showMessage("错误", "产品极差超出设定值");
+                                writePLCValue(PCResult, 2);
+                                result = "NG";
+                            }
+                            else if (min<Calibration.setMin)
+                            {
+                                writePLCValue(PCResult, 3);
+                                result = "NG";
+                                showMessage("错误", "产品的最小值低于设定值，请检查产品是否异常");
+                            }
+                            else
+                            {
+                                writePLCValue(PCResult, 1);
+                                result = "OK";
+                                showMessage("状态", measuringStatus + "，产品OK");
+
+                            }
+                        }
+                        else if (Calibration.mode == 1)
+                        {
+                            if (min < Calibration.setMin || max > Calibration.setMax)
+                            {
+                                ShowErrorNotifier("产品的最大值或最小值超出设定值，请检查产品是否异常", false, 900000);
+                                showMessage("错误", "产品的最大值或最小值超出设定值，请检查产品是否异常");
+                                writePLCValue(PCResult, 2);
+                                result = "NG";
+                            }
+                            else
+                            {
+                                writePLCValue(PCResult, 1);
+                                result = "OK";
+                                showMessage("状态", measuringStatus + "，产品OK");
+                            }
+                        }
+                        if (max == 0 || min == 0)
+                        {
+                            result = "NG";
+                            writePLCValue(PCResult, 1);
+                        }
+
+                        try
+                        {
+                            //cmd = new MySqlCommand("INSERT INTO `thicknessmeasurement`.`productionlog` ( `datee`, `settingThickness`, `max`, `min`, `max-min`, `avg`, `totalcount`) VALUES ('" + DateTime.Now.ToString("yyyy-MM-dd") + "', '" + uiDoubleUpDown1.Value + "', '" + max + "', '" + min + "', '" + max_min + "', '" + avg + "', '" + DtChart1.Rows.Count + ";", cnn);
+                            cmd = new MySqlCommand(string.Format("INSERT INTO `thicknessmeasurement`.`productionlog` ( `datee`,`MaterialNum`,`LotNum`, `settingThickness`,`settingMax`,`settingMin`,`settingMax_min`,`result`, `max`, `min`, `max-min`, `avg`, `totalcount`, `11`, `12`, `13`, `14`, `21`, `22`, `23`, `24`, `31`, `32`, `33`, `34`) VALUES ('{0}', '{1}', '{2}', '{3}', '{4}', '{5}', '{6}', '{7}', '{8}', '{9}', '{10}', '{11}', '{12}', '{13}', '{14}', '{15}', '{16}', '{17}', '{18}', '{19}', '{20}', '{21}', '{22}', '{23}', '{24}');",
+                                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), uiTextBox8.Text, uiTextBox6.Text, Calibration.setThickness, Calibration.setMax, Calibration.setMin, Calibration.setMax_Min, result, max, min, max_min, avg, DtChart1.Rows.Count, d11, d12, d13, d14, d21, d22, d23, d24, d31, d32, d33, d34), cnn);
+                            cmd.ExecuteNonQuery();
+                        }
+                        catch
+                        {
+                            cmd = new MySqlCommand(string.Format("INSERT INTO `thicknessmeasurement`.`productionlog` ( `datee`,`MaterialNum`,`LotNum`, `settingThickness`,`settingMax`,`settingMin`,`settingMax_min`,`result`, `max`, `min`, `max-min`, `avg`, `totalcount`, `11`, `12`, `13`, `14`, `21`, `22`, `23`, `24`, `31`, `32`, `33`, `34`) VALUES ('{0}', '{1}', '{2}', '{3}', '{4}', '{5}', '{6}', '{7}', '{8}', '{9}', '{10}', '{11}', '{12}', '{13}', '{14}', '{15}', '{16}', '{17}', '{18}', '{19}', '{20}', '{21}', '{22}', '{23}', '{24}');",
+                                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), uiTextBox8.Text, uiTextBox6.Text, Calibration.setThickness,Calibration.setMax,Calibration.setMin,Calibration.setMax_Min,result, max, min, max_min, 0, DtChart1.Rows.Count, d11, d12, d13, d14, d21, d22, d23, d24, d31, d32, d33, d34), cnn);
+                            cmd.ExecuteNonQuery();
+                        }
+                        DateTime dt;
+                        dt= DateTime.Now;
+                        try
+                        {
+                            MySqlCommand cmd1 = new MySqlCommand("SELECT * FROM thicknessmeasurement.productionlog where datee between '" + dt.AddDays(-1).ToString("yyyy-MM-dd") + " 00:00:00' and '" + dt.ToString("yyyy-MM-dd") + " 23:59:59';", cnn);
+                            MySqlDataAdapter adapter = new MySqlDataAdapter(cmd1);
+                            ProductionLog.Rows.Clear();
+                            adapter.Fill(ProductionLog);
+                        }
+                        catch { }
+                        double yield = 0;
+                        for (int i = 0; i < ProductionLog.Rows.Count; i++)
+                        {
+                            if (ProductionLog.Rows[i][5].ToString().Trim() == "OK")
+                            {
+                                yield++;
+                            }
+                        }
+                        uiTextBox7.Text = yield.ToString()+"次";
+                        try { uiTextBox9.Text = ((yield / ProductionLog.Rows.Count) * 100).ToString("0.00") + "%"; } catch { }
+                        measuringStatus = "等待产品进入";
+                        uiTextBox12.Text=(DateTime.Now-measureStart).TotalSeconds.ToString();
+                        break;
+                    case "自动测厚停止"://手动模式开启采样后，自动测厚暂停
+                        measuringStatus = "等待产品进入";
+                        //ShowErrorTip("自动测厚停止");
+                        break;
+                    default:
+                        break;
+                }
+                Delay(100);
+            }
+		}
+        DataTable ProductionLog=new DataTable();
+        double avg1 = 0;double avg2 = 0;double avg3 = 0;double avg123;
+        MC_ResultDataTypeDef_t[] res=new MC_ResultDataTypeDef_t[20000];         //这个大小是cache阈值
+        double d11 = 0; double d12 = 0; double d13 = 0; double d14 = 0;
+        double d21 = 0; double d22 = 0; double d23 = 0; double d24 = 0;
+        double d31 = 0; double d32 = 0; double d33 = 0; double d34 = 0;
+        public static void Delay(int mm)
+        {
+            DateTime current = DateTime.Now;
+            while (current.AddMilliseconds(mm) > DateTime.Now)
+            {
+                Application.DoEvents();
+            }
+            return;
+        }
+        int dataHead = 0;int dataTail = 0;
+        /// <summary>
+        /// 减小校准误差
+        /// </summary>
+        /// <param name="avg"></param>
+        /// <param name="avg123"></param>
+        /// <param name="DtChart"></param>
+        /// <param name="lineChart"></param>
+        /// <param name="dt"></param>
+        void avgData(double avg,double avg123, DataTable DtChart,UILineChart lineChart, out DataTable dt)
+        {
+            dt = new DataTable();
+            dt.Columns.Add("Data");
+            if (avg - avg123 > 0.005)
+            {
+                for (int i = 0; i < DtChart.Rows.Count; i++)
+                {
+                    dt.Rows.Add(Convert.ToDouble(DtChart.Rows[i][0]) - 0.005);
+                }
+            }
+            else if (avg123 - avg > 0.005)
+            {
+                for (int i = 0; i < DtChart.Rows.Count; i++)
+                {
+                    dt.Rows.Add(Convert.ToDouble(DtChart.Rows[i][0]) + 0.005);
+                }
+            }
+            else 
+            {
+                for (int i = 0; i < DtChart.Rows.Count; i++)
+                {
+                    dt.Rows.Add(Convert.ToDouble(DtChart.Rows[i][0]));
+                }
+            }
+            uiTextBox10.Text = DtChart.Rows.Count.ToString();
+            try
+            {
+                for (int i = 0; i < DtChart.Rows.Count; i++)
+                {
+                    lineChart.Option.AddData("厚度曲线", i, Convert.ToDouble(DtChart.Rows[i][0]));
+                }
+                lineChart.Refresh();
+
+            }
+            catch
+            {
+
+            }
+        }
+        /// <summary>
+        /// 去除头尾震荡数据，并轻微做平滑处理
+        /// </summary>
+        /// <param name="dataFromSensor"></param>
+        /// <param name="lineChart"></param>
+        /// <param name="DtChart"></param>
+        /// <param name="avg"></param>
+        void convertData(double[] dataFromSensor,UILineChart lineChart, out DataTable DtChart,out double avg)
+		{
+
+            dataHead = 0;
+            dataTail = 0;
+            DtChart = new DataTable();
+            DtChart.Columns.Add("Data");
+            int a = 0;
+            for (int i = 0; i < dataFromSensor.Length; i++)
+            {
+                if (dataFromSensor[i].ToString() != "" && dataFromSensor[i] <= 3.2&& dataFromSensor[i] >= 0.06)
+                {
+                    dataHead= i+1;
+                    break;
+                }
+            }
+            for (int i = dataFromSensor.Length-1; i >=0; i--)
+            {
+                if (dataFromSensor[i].ToString() != "" && dataFromSensor[i] <= 3.2&& dataFromSensor[i] >= 0.06)
+                {
+                    dataTail = i + 1;
+                    break;
+                }
+            }
+            double totalCount = Convert.ToDouble(dataTail - dataHead + 1);
+            double NGCount = 0;
+            uiTextBox1.Text=(dataTail-dataHead+1).ToString();
+            int removeHead = Convert.ToInt32(ConfigurationManager.AppSettings["RemoveHaed"]);//去头n个
+            int removeTail = Convert.ToInt32(ConfigurationManager.AppSettings["RemoveTail"]);//去尾m个
+            try
+            {
+                for (int i = 0; i < dataFromSensor.Length; i++)
+                {
+                    ////取得数据并去头
+                    if (dataFromSensor[i + removeHead].ToString() != "" && dataFromSensor[i + removeHead] <= 3.2 && dataFromSensor[i + removeHead] > 0.06)
+                    {
+                        DtChart.Rows.Add(Math.Round(dataFromSensor[i + removeHead], 4));
+                    }
+                    ////不去头100个
+                    //if (dataFromSensor[i].ToString() != "" && dataFromSensor[i] <= 3.2 && dataFromSensor[i] > 0.3)
+                    //{
+                    //    //DtChart.Rows.Add(DtFromSSR[i]);
+                    //    DtChart.Rows.Add(Math.Round(dataFromSensor[i], 4));//保留4位小数
+                    //}
+                }
+            }
+            catch { }
+            try
+            {
+                //去尾
+                for (int i = 0; i < removeTail; i++)
+                {
+                    DtChart.Rows.Remove(DtChart.Rows[DtChart.Rows.Count - removeTail + i]);
+                }
+            }
+            catch { }
+            //硬件补偿
+            decimal offset=0;
+            if (dataFromSensor == dataFromSsr1){offset = Convert.ToDecimal(ConfigurationManager.AppSettings["Offset_1"]);}
+            else if (dataFromSensor == dataFromSsr2) { offset = Convert.ToDecimal(ConfigurationManager.AppSettings["Offset_2"]); }
+            else if (dataFromSensor == dataFromSsr3) { offset = Convert.ToDecimal(ConfigurationManager.AppSettings["Offset_3"]); }
+            foreach (DataRow row in DtChart.Rows)
+            {
+                decimal value = Convert.ToDecimal(row[0]); // 获取第1列的值并转换为decimal类型
+                value += offset; // 增加0.005
+                row[0] = value; // 更新第1列的值
+            }
+
+            double sum = 0;
+            for (int i = 0; i < DtChart.Rows.Count; i++)
+            {
+
+                sum += Convert.ToDouble(DtChart.Rows[i][0]);
+            }
+            avg= sum / DtChart.Rows.Count;//第一次取平均
+            sum = 0;
+            for (int i = 0; i < DtChart.Rows.Count; i++)
+            {
+                if (avg > Convert.ToDouble(DtChart.Rows[i][0]) + 0.15 || avg < Convert.ToDouble(DtChart.Rows[i][0]) - 0.15)
+                {
+                    sum += avg;
+                }
+                else
+                {
+                    sum += Convert.ToDouble(DtChart.Rows[i][0]);
+                }
+            }
+            avg = sum / DtChart.Rows.Count;//第二次取平均，去除过大过小值
+            DataTable dt = new DataTable();
+            dt.Columns.Add("Data");
+            int badData = 0;
+            double level = Convert.ToDouble(ConfigurationManager.AppSettings["Level"]);
+            for (int i = 0; i < DtChart.Rows.Count; i++)//数值平滑处理
+            {
+                if (Convert.ToDouble(DtChart.Rows[i][0]) >= avg + 0.1)
+                {
+                    badData++;
+                    if (badData < 3)
+                    {
+                        dt.Rows.Add(avg);
+                    }
+                    else
+                    {
+                        dt.Rows.Add(Convert.ToDouble(DtChart.Rows[i][0])-0.004*level);
+                    }
+                }
+                else if (Convert.ToDouble(DtChart.Rows[i][0]) >= avg + 0.03)
+                {
+                    dt.Rows.Add(Convert.ToDouble(DtChart.Rows[i][0]) - 0.003*level);
+                }
+                else if (Convert.ToDouble(DtChart.Rows[i][0]) >= avg + 0.02)
+                {
+                    dt.Rows.Add(Convert.ToDouble(DtChart.Rows[i][0]) - 0.002*level);
+                }
+                else if (Convert.ToDouble(DtChart.Rows[i][0]) >= avg + 0.01)
+                {
+                    dt.Rows.Add(Convert.ToDouble(DtChart.Rows[i][0]) - 0.001*level);
+                }
+                else if (Convert.ToDouble(DtChart.Rows[i][0]) <= avg - 0.1) 
+                {
+                    badData++;
+                    if (badData < 5)
+                    {
+                        dt.Rows.Add(avg);
+                    }
+                    else
+                    {
+                        dt.Rows.Add(Convert.ToDouble(DtChart.Rows[i][0])+0.004*level);
+                    }
+                }
+                else if (Convert.ToDouble(DtChart.Rows[i][0]) <= avg - 0.03)
+                {
+                    dt.Rows.Add(Convert.ToDouble(DtChart.Rows[i][0]) + 0.003*level);
+                }
+                else if (Convert.ToDouble(DtChart.Rows[i][0]) <= avg - 0.02)
+                {
+                    dt.Rows.Add(Convert.ToDouble(DtChart.Rows[i][0]) + 0.002*level);
+                }
+                else if (Convert.ToDouble(DtChart.Rows[i][0]) <= avg - 0.01)
+                {
+                    dt.Rows.Add(Convert.ToDouble(DtChart.Rows[i][0]) + 0.001*level);
+                }
+                else
+                {
+                    dt.Rows.Add(Convert.ToDouble(DtChart.Rows[i][0]));
+                }
+            }
+            DtChart.Clear();
+            DtChart = dt;
+            sum = 0;
+            for (int i = 0; i < DtChart.Rows.Count; i++)
+            {
+                if (avg > Convert.ToDouble(DtChart.Rows[i][0]) + 0.15 || avg < Convert.ToDouble(DtChart.Rows[i][0]) - 0.15)
+                {
+                    sum += avg;
+                }
+                else
+                {
+                    sum += Convert.ToDouble(DtChart.Rows[i][0]);
+                }
+            }
+            avg = sum / DtChart.Rows.Count;
+            //for (int i = 0; i < DtChart.Rows.Count; i++)//根据大于产品厚度一定范围的值，判断NG数量
+            //{
+            //    if ((Convert.ToDouble(DtChart.Rows[i][0]) > Calibration.setThickness + NGRange) || (Convert.ToDouble(DtChart.Rows[i][0]) < Calibration.setThickness - NGRange))
+            //    {
+            //        NGCount++;
+            //    }
+
+            //}
+            //if (NGCount < (0.05 * totalCount))//板不NG，就把大于产品一定范围外的值剔除
+            //{
+            //    dt.Columns.Add("Data");
+            //    for (int i = 0; i < DtChart.Rows.Count; i++)
+            //    {
+            //        if ((Convert.ToDouble(DtChart.Rows[i][0]) < Calibration.setThickness + NGRange) && (Convert.ToDouble(DtChart.Rows[i][0]) > Calibration.setThickness - NGRange))
+            //        {
+            //            dt.Rows.Add(DtChart.Rows[i][0]);
+            //        }
+            //    }
+            //    DtChart.Clear();
+            //    DtChart = dt;
+            //}
+            //         uiTextBox10.Text=DtChart.Rows.Count.ToString();
+            //try
+            //{
+
+            //             for (int i = 0; i < DtChart.Rows.Count; i++)
+            //             {
+            //                 lineChart.Option.AddData("厚度曲线", i, Convert.ToDouble(DtChart.Rows[i][0]));
+            //             }
+            //             lineChart.Refresh();
+
+            //         }
+            //         catch
+            //{
+
+            //}
+            //求和取平均
+            //double sum1 = 0;
+            //dt.Compute("SUM(Data)", "");
+            //for (int i = 0; i < DtChart.Rows.Count; i++)
+            //{
+            //    sum1 += Convert.ToDouble(DtChart.Rows[i][0]);
+            //}
+
+        }
+        double NGRange = 0.01;
+        bool stop = false;
+
+        private void uiLabel1_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void uiGroupBox1_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void uiBarChart1_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void uiGroupBox2_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void uiButton3_Click(object sender, EventArgs e)
+        {
+            stop=true;
+        }
+
+        private void uiTextBox5_TextChanged(object sender, EventArgs e)
+        {
+
+        }
+        int plcHeartbeat=0;int pcHeartbeat = 0;DateTime LatestHeartbeat = DateTime.Now;bool PLCDisconnected=true;
+		private void timer1_Tick(object sender, EventArgs e)
+		{
+            PLC.GetDevice(PLCHeartBeat, out plcHeartbeat); PLC.GetDevice(PCHeartBeat, out pcHeartbeat);
+            if (plcHeartbeat == pcHeartbeat)//心跳
+            {
+                pcHeartbeat = plcHeartbeat == 1 ? 2 : 1;
+                writePLCValue(PCHeartBeat, pcHeartbeat);
+                LatestHeartbeat = DateTime.Now;
+                if (PLCDisconnected == false)
+                {
+                    showMessage("状态", "PLC连接成功");
+                    PLCDisconnected = true;
+                }
+            }
+            if ((DateTime.Now - LatestHeartbeat).TotalSeconds > 10)//PLC自重连
+            {
+                PLCReturnCode = PLC.Open();
+                if (PLCReturnCode == 0)
+                {
+                    showMessage("状态", "PLC连接成功");
+                }
+                else
+                {
+                    showMessage("状态", "PLC心跳断开连接"); PLCDisconnected = false;
+                }
+            }
+        }
+        string  plcGetString(int plcDevice)
+		{
+            
+            int[] values=new int[10]; 
+            for (int i = 0; i < 10; i++)
+            {
+                PLC.GetDevice("D" + plcDevice.ToString(), out values[i]);
+                plcDevice++;
+            }
+            string asciiString = "";
+            string output = "";
+            try
+            {
+                for (int j = 0; j < 10; j++)
+                {
+                    for (int i = 0; i < 2; i++)
+                    {
+                        char c = (char)((values[j] >> (8 * i)) & 0xFF); // 获取每个字节，并转换为char类型
+                        asciiString += c.ToString(); // 拼接成字符串
+                        
+                    }
+                    output += asciiString;
+                    asciiString = "";
+                }
+            }
+            catch { }
+            return output;
+        }
+
+		private void uiButton2_Click(object sender, EventArgs e)
+		{
+            writePLCValue("D7002", 1);
+            PLC.GetDevice(BatchID, out int batchID); uiTextBox6.Text = batchID.ToString();
+            uiTextBox8.Text = plcGetString(Convert.ToInt32(MaterialID)).Trim();
+            PLC.GetDevice(Thickness, out int thickness); Calibration.setThickness = ((double)thickness) / 100;
+            PLC.GetDevice(SetMax, out int setMax); Calibration.setMax = ((double)setMax) / 100;
+            PLC.GetDevice(SetMin, out int setMin); Calibration.setMin = ((double)setMin) / 100;
+            PLC.GetDevice(SetMax_Min, out int setMax_Min); Calibration.setMin = ((double)setMax_Min) / 100;
+        }
+    }
+}
