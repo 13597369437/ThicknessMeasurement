@@ -127,6 +127,8 @@
             this.lineChart1.Style = Sunny.UI.UIStyle.Custom;
             this.lineChart1.SubFont = new System.Drawing.Font("微软雅黑", 12F);
             this.lineChart1.TabIndex = 7;
+            this.lineChart1.Tag = "";
+            this.lineChart1.TagString = "1";
             this.lineChart1.Text = "6";
             this.lineChart1.ZoomScaleRect = new System.Drawing.Rectangle(0, 0, 0, 0);
             // 
@@ -153,6 +155,7 @@
             this.lineChart2.Style = Sunny.UI.UIStyle.Custom;
             this.lineChart2.SubFont = new System.Drawing.Font("微软雅黑", 12F);
             this.lineChart2.TabIndex = 13;
+            this.lineChart2.TagString = "2";
             this.lineChart2.Text = "uiLineChart2";
             this.lineChart2.ZoomScaleRect = new System.Drawing.Rectangle(0, 0, 0, 0);
             // 
@@ -167,6 +170,7 @@
             this.lineChart3.Style = Sunny.UI.UIStyle.Custom;
             this.lineChart3.SubFont = new System.Drawing.Font("微软雅黑", 12F);
             this.lineChart3.TabIndex = 14;
+            this.lineChart3.TagString = "3";
             this.lineChart3.Text = "uiLineChart3";
             this.lineChart3.ZoomScaleRect = new System.Drawing.Rectangle(0, 0, 0, 0);
             // 

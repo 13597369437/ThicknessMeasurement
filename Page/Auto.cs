@@ -2338,7 +2338,7 @@ namespace ThicknessMeasurement
             option.ToolTip.Visible = true;
             option.Title = new UITitle();
             option.Title.Text = "测厚数据曲线";
-            option.Title.SubText = "1号测量头";
+            option.Title.SubText = $"{lineChart.TagString}号测量头";
             option.YAxis.SetRange(svhd - y1 / 2, svhd + y1 / 2);
             option.XAxis.AxisLabel.DecimalPlaces = 0;//坐标轴显示小数位数
             option.YAxis.AxisLabel.DecimalPlaces = 3;

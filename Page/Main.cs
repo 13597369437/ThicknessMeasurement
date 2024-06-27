@@ -192,8 +192,9 @@ namespace ThicknessMeasurement
 					Text = "Login",
 					Title = "登录以获取权限进行修改",
 					SubText = "",
-					UserName = "Admin"
-				};
+                    //UserName = "Admin"
+                    UserName = ""
+                };
 				//绑定确定按钮事件
 				frm.OnLogin += Frm_OnLogin;
 				//设置主题
