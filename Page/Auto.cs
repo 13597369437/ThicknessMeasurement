@@ -198,9 +198,9 @@ namespace ThicknessMeasurement
 
 
             //连接读码器
-            if (DataClass.peizhivalues[1] == "1" && DataClass.peizhivalues[3] == "1")
+            if (DataClass.peizhivalues[1] == "1")
             {
-                lianjieccd();
+                lianjieccd(); 
             }
 
         }
@@ -234,8 +234,8 @@ namespace ThicknessMeasurement
             toolStripStatusLabel5.Visible = DataClass.peizhivalues[8] == "1";
             toolStripStatusLabel6.Visible = DataClass.peizhivalues[8] == "1";
 
-            toolStripStatusLabel7.Visible = DataClass.peizhivalues[1] == "1" && DataClass.peizhivalues[3] == "1";
-            toolStripStatusLabel8.Visible = DataClass.peizhivalues[1] == "1" && DataClass.peizhivalues[3] == "1";
+            toolStripStatusLabel7.Visible = DataClass.peizhivalues[1] == "1";
+            toolStripStatusLabel8.Visible = DataClass.peizhivalues[1] == "1";
         }
 
         //界面切换事件
@@ -856,6 +856,15 @@ namespace ThicknessMeasurement
 
         Socket socketSend;
         string code = "";//读取到的二维码
+        List<string> l_code=new List<string>();
+
+        enum Duma
+        {
+            开始读码,
+            等待开始
+        }
+
+        Duma dm=new Duma();
 
         //连接相机
         void lianjieccd()
@@ -874,9 +883,12 @@ namespace ThicknessMeasurement
                         //获得要连结的远程服务器应用程序的IP地址和端口号
                         socketSend.Connect(point);
 
+
                         Invoke(new Action(() =>
                         {
                             showMessage("状态", "读码器连接成功");
+                            toolStripStatusLabel8.Text = "在线";
+                            toolStripStatusLabel8.BackColor = Color.Green;
                         }));
 
                         break;
@@ -888,6 +900,8 @@ namespace ThicknessMeasurement
                         Invoke(new Action(() =>
                         {
                             showMessage("状态", "测厚仪断开连接");
+                            toolStripStatusLabel8.Text = "离线";
+                            toolStripStatusLabel8.BackColor = Color.Red;
                         }));
                         socketSend.Close();
 
@@ -902,12 +916,56 @@ namespace ThicknessMeasurement
 
         void Receive()
         {
-            while (true)
+            int startduma = 0;
+            bool dmok = true;
+            DateTime startdmdt = new DateTime();//开始读码时间
+            while (dmok)
             {
                 try
                 {
-                    //开始识别
-                    if (!test2()) break;
+                    PLC.GetDevice(DataClass.peizhivalues[157], out startduma);
+                    switch (dm)
+                    {
+                        case Duma.等待开始:
+                            if (startduma == 1)
+                            {
+                                dm = Duma.开始读码;
+                                startdmdt = new DateTime();
+                                code = "";
+                            }
+                            break;
+
+                        case Duma.开始读码:
+                           
+                            //开始识别
+                            if (!解析扫码器字符()) 
+                                dmok=false;
+
+                            if (code == "")
+                            {
+                                //读码超时，重新开始
+                                if ((DateTime.Now - startdmdt).TotalSeconds > int.Parse(DataClass.peizhivalues[3]))
+                                {
+                                    dm = Duma.等待开始;
+                                    PLC.SetDevice(DataClass.peizhivalues[157], 3);
+                                }
+                            }
+                            else
+                            {
+                                dm = Duma.等待开始;
+                                PLC.SetDevice(DataClass.peizhivalues[157], 2);
+                                l_code.Add(code);
+                            }
+
+                            break;
+
+                        default:
+                            dm = Duma.等待开始;
+                            break;
+                    }
+
+
+                   
                 }
                 catch (Exception ex)
                 {
@@ -918,8 +976,8 @@ namespace ThicknessMeasurement
 
             Invoke(new Action(() =>
             {
-                //toolStripStatusLabel5.Text = "断开连接";
-                //toolStripStatusLabel5.BackColor = Color.Red;
+                toolStripStatusLabel8.Text = "离线";
+                toolStripStatusLabel8.BackColor = Color.Red;
             }));
 
             socketSend.Close();
@@ -930,7 +988,7 @@ namespace ThicknessMeasurement
         }
 
         //扫码器触发
-        void test1()
+        void 扫码器触发()
         {
 
             byte[] buffer = new byte[] { 84, 13, 10 };
@@ -939,11 +997,11 @@ namespace ThicknessMeasurement
         }
 
         //解析扫码器字符
-        bool test2()
+        bool 解析扫码器字符()
         {
             Task.Delay(int.Parse(DataClass.peizhivalues[6]));
 
-            test1();
+            扫码器触发();
 
             byte[] buffer = new byte[1024 * 1024 * 2];
             int r = socketSend.Receive(buffer);
@@ -1760,6 +1818,14 @@ namespace ThicknessMeasurement
         {
             try
             {
+                string code2 = "";
+                if(l_code.Count>0)
+                {
+                    //获取最先读到的二维码
+                    code2 = l_code[0];
+                    l_code.RemoveAt(0);
+                }
+
                 var prod = new productionlog
                 {
                     datee = DateTime.Now.ToString("G"),
@@ -1787,24 +1853,24 @@ namespace ThicknessMeasurement
                     d32 = d32.ToString(precision),
                     d33 = d33.ToString(precision),
                     d34 = d34.ToString(precision),
-                    钢板ID = code
+                    钢板ID = code2
                 };
 
                 fsql.Insert(prod).ExecuteIdentity();
 
-                if (DataClass.peizhivalues[1] == "1" && DataClass.peizhivalues[3] == "1")
+                if (DataClass.peizhivalues[1] == "1")
                 {
-                    var gbjl = fsql.Select<钢板记录>().Where(w => w.钢板ID == code).ToList();
+                    var gbjl = fsql.Select<钢板记录>().Where(w => w.钢板ID == code2).ToList();
                     if (gbjl.Count > 0)
                     {
                         int num = gbjl[0].生产次数 + 1;
-                        fsql.Update<钢板记录>().Set(s => s.生产次数 == num).Where(w => w.钢板ID == code).ExecuteAffrowsAsync();
+                        fsql.Update<钢板记录>().Set(s => s.生产次数 == num).Where(w => w.钢板ID == code2).ExecuteAffrowsAsync();
                     }
                     else
                     {
                         var gb = new 钢板记录()
                         {
-                            钢板ID = code,
+                            钢板ID = code2,
                             生产次数 = 1
                         };
                         fsql.Insert(gb).ExecuteAffrowsAsync();
@@ -2651,6 +2717,14 @@ namespace ThicknessMeasurement
         {
             try
             {
+                string code3 = "";
+                if (l_code.Count > 0)
+                {
+                    //获取最先读到的二维码
+                    code3 = l_code[0];
+                    l_code.RemoveAt(0);
+                }
+
                 var prod = new productionlog
                 {
                     datee = DateTime.Now.ToString("G"),
@@ -2678,24 +2752,24 @@ namespace ThicknessMeasurement
                     d32 = d32.ToString(precision),
                     d33 = d33.ToString(precision),
                     d34 = d34.ToString(precision),
-                    钢板ID = code
+                    钢板ID = code3
                 };
 
                 fsql.Insert(prod).ExecuteIdentity();
 
-                if (DataClass.peizhivalues[1] == "1" && DataClass.peizhivalues[3] == "1")
+                if (DataClass.peizhivalues[1] == "1")
                 {
-                    var gbjl = fsql.Select<钢板记录>().Where(w => w.钢板ID == code).ToList();
+                    var gbjl = fsql.Select<钢板记录>().Where(w => w.钢板ID == code3).ToList();
                     if (gbjl.Count > 0)
                     {
                         int num = gbjl[0].生产次数 + 1;
-                        fsql.Update<钢板记录>().Set(s => s.生产次数 == num).Where(w => w.钢板ID == code).ExecuteAffrowsAsync();
+                        fsql.Update<钢板记录>().Set(s => s.生产次数 == num).Where(w => w.钢板ID == code3).ExecuteAffrowsAsync();
                     }
                     else
                     {
                         var gb = new 钢板记录()
                         {
-                            钢板ID = code,
+                            钢板ID = code3,
                             设定次数 = 100,
                             生产次数 = 1
                         };
