@@ -61,7 +61,7 @@ namespace ThicknessMeasurement.Page
                             break;
                         case "6":
                             uiDoubleUpDown11.Value =  double.Parse(FloatResultValueOutToText(calcData));
-                            inputValues[4] = 计算测厚头测量值(4, 5);
+                            inputValues[5] = 计算测厚头测量值(4, 5);
                             break;
                     }
                 }
